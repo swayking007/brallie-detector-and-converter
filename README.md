@@ -164,9 +164,7 @@ Development of this project was accelerated using AI-assisted coding and documen
 
 ## 👥 Team
 
-* **[Team Member 1 Name]** - [Role]
-* **[Team Member 2 Name]** - [Role]
-* **[Team Member 3 Name]** - [Role]
+* **[SWAYAM SAHU]**
 
 ## 📄 License
 
