@@ -1,0 +1,3 @@
+# BrailleVisionAI Models
+# Place trained model weights here (e.g., braille_yolov8.pt)
+# These files are excluded from Git via .gitignore.

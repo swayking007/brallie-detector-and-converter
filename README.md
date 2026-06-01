@@ -2,6 +2,13 @@
 
 > An AI-powered real-time accessibility assistant that detects embossed Braille from camera images and converts it into English text and speech.
 
+![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.x-red?style=flat-square&logo=streamlit)
+![OpenCV](https://img.shields.io/badge/OpenCV-4.x-green?style=flat-square&logo=opencv)
+![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-purple?style=flat-square)
+![Phase](https://img.shields.io/badge/Phase-C%20Complete-22c55e?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
+
 ## 📌 Problem Statement
 
 Millions of visually impaired individuals and their sighted caregivers, teachers, and family members face a persistent communication gap. While Braille is an essential written language for accessibility, specialized Braille reading hardware is often expensive, bulky, and not universally available. Furthermore, sighted individuals who do not know Braille struggle to assist visually impaired students or relatives with written materials. There is a critical need for an affordable, portable, and real-time solution to bridge this literacy and communication divide using everyday devices.

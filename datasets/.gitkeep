@@ -1,0 +1,4 @@
+# BrailleVisionAI Datasets
+# Place raw Braille image datasets here.
+# Subfolders: raw/, annotated/, cache/
+# This directory is excluded from Git via .gitignore (cache & zip files).

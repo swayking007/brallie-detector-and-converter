@@ -1,0 +1,3 @@
+# datasets/captured_frames — Phase B
+# Webcam snapshots captured during live sessions are saved here.
+# Filenames use timestamp format: snapshot_YYYYMMDD_HHMMSS_mmm.jpg

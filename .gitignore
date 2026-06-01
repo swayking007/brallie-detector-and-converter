@@ -1,0 +1,131 @@
+# ============================================================
+# BrailleVisionAI - .gitignore
+# ============================================================
+
+# ----------------------------
+# Python
+# ----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.pyc
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# ----------------------------
+# Virtual Environment
+# ----------------------------
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# ----------------------------
+# Environment Variables
+# ----------------------------
+.env
+.env.local
+.env.*.local
+secrets.toml
+*.secret
+
+# ----------------------------
+# Model Weights & Checkpoints
+# ----------------------------
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.weights
+models/*.h5
+models/*.bin
+*.ckpt
+runs/
+weights/
+
+# ----------------------------
+# Datasets & Cache
+# ----------------------------
+datasets/raw/
+datasets/cache/
+datasets/*.zip
+datasets/*.tar.gz
+*.cache
+.cache/
+__pycache__/
+
+# ----------------------------
+# Jupyter Notebooks
+# ----------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ----------------------------
+# Streamlit
+# ----------------------------
+.streamlit/secrets.toml
+
+# ----------------------------
+# OS Files
+# ----------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ----------------------------
+# IDEs & Editors
+# ----------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ----------------------------
+# Logs & Temporary Files
+# ----------------------------
+*.log
+*.tmp
+*.temp
+logs/
+tmp/
+temp/
+
+# ----------------------------
+# Testing & Coverage
+# ----------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# ----------------------------
+# Documentation Build
+# ----------------------------
+docs/_build/
+site/
+
+# ----------------------------
+# Miscellaneous
+# ----------------------------
+*.bak
+*.orig
