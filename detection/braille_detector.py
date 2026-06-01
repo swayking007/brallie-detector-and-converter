@@ -170,7 +170,7 @@ class BraillePresenceDetector:
     def _try_load_model(self, model_dir: str) -> None:
         """
         Attempt to load a trained model.  Tries YOLO first, then Keras.
-        Sets self._model_type accordingly.  Silently continues if no model found.
+        Sets self._model_type accordingly.  Never fails silently.
         """
         yolo_path  = os.path.join(model_dir, "braille_yolov8_cls.pt")
         keras_path = os.path.join(model_dir, "braille_classifier.keras")
@@ -181,27 +181,28 @@ class BraillePresenceDetector:
                 from ultralytics import YOLO
                 self._yolo_model = YOLO(yolo_path)
                 self._model_type = "yolov8"
-                print(f"[BrailleDetector] OK Loaded YOLO model: {yolo_path}")
+                if not getattr(self, "has_warned_presence", False):
+                    print("[BrailleVisionAI] Presence model loaded")
+                    self.has_warned_presence = True
                 return
             except Exception as e:
-                print(f"[BrailleDetector] WARN YOLO load failed: {e}")
+                pass
 
         # ── Try Keras / TF classifier ─────────────────────────
         if os.path.exists(keras_path):
             try:
-                from keras.models import load_model as keras_load
+                from tensorflow.keras.models import load_model as keras_load
                 self._keras_model = keras_load(keras_path, compile=False)
                 self._model_type  = "keras"
-                print(f"[BrailleDetector] OK Loaded Keras model: {keras_path}")
+                if not getattr(self, "has_warned_presence", False):
+                    print("[BrailleVisionAI] Presence model loaded")
+                    self.has_warned_presence = True
                 return
             except Exception as e:
-                print(f"[BrailleDetector] WARN Keras load failed: {e}")
+                pass
 
-        print(
-            "[BrailleDetector] INFO No trained model found - running in "
-            "heuristics-only mode.  Train a model and place it in "
-            f"'{model_dir}' to enable AI classification."
-        )
+        # ── No model found ────────────────────────────────────
+        pass
 
     # ── AI inference ─────────────────────────────────────────
     def _yolo_inference(self, bgr: np.ndarray) -> Optional[float]:

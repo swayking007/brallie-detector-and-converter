@@ -3,6 +3,12 @@ BrailleVisionAI — Main Application
 Restored full functionality with tabbed navigation and cleaned interface.
 """
 
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+import warnings
+warnings.filterwarnings("ignore")
+
 import time
 import streamlit as st
 from PIL import Image
@@ -78,6 +84,105 @@ if "voice_volume" not in st.session_state: st.session_state.voice_volume = 1.0
 
 if "latest_text" not in st.session_state: st.session_state.latest_text = ""
 if "analytics_data" not in st.session_state: st.session_state.analytics_data = []
+
+if "app_initialized" not in st.session_state:
+    print("[BrailleVisionAI] App initialized")
+    st.session_state.app_initialized = True
+
+# ─── Dependency Check ─────────────────────────────────────────
+REQUIRED_PACKAGES = {
+    "ultralytics": "ultralytics>=8.2.0",
+    "torch": "torch",
+    "torchvision": "torchvision",
+    "cv2": "opencv-python",
+    "numpy": "numpy",
+    "streamlit": "streamlit",
+    "PIL": "Pillow",
+}
+
+def _check_dependencies():
+    """Check for required packages and return missing ones."""
+    missing = []
+    for module_name, pip_name in REQUIRED_PACKAGES.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(pip_name)
+    return missing
+
+_missing_deps = _check_dependencies()
+if _missing_deps:
+    for pkg in _missing_deps:
+        st.error(
+            f"Missing dependency: **{pkg}**\n\n"
+            f"Run:\n```\npip install {pkg}\n```"
+        )
+
+# ─── System Status Helper ────────────────────────────────────
+def _get_system_status():
+    """Gather model/engine status for the System Status panel."""
+    import os
+    base = os.path.dirname(os.path.abspath(__file__))
+
+    dot_model_path = os.path.join(base, "models", "braille_dots", "braille_dots_yolov8.pt")
+    presence_yolo  = os.path.join(base, "models", "braille_presence", "braille_yolov8_cls.pt")
+    presence_keras = os.path.join(base, "models", "braille_presence", "braille_classifier.keras")
+
+    dot_model_exists = os.path.exists(dot_model_path)
+    presence_model_exists = os.path.exists(presence_yolo) or os.path.exists(presence_keras)
+
+    # Determine detection engine from live detector if available
+    dot_engine = "OpenCV (heuristic)"
+    dot_loaded = False
+    if PIPELINE_OK and "_phase_e_dot_detector" in st.session_state:
+        det = st.session_state["_phase_e_dot_detector"]
+        if getattr(det, "mode", "opencv") == "yolov8":
+            dot_engine = "YOLOv8"
+            dot_loaded = True
+
+    presence_engine = "Heuristics only"
+    presence_loaded = False
+    if PIPELINE_OK and "_phase_d_detector" in st.session_state:
+        det = st.session_state["_phase_d_detector"]
+        mtype = getattr(det, "_model_type", "heuristics_only")
+        if mtype == "yolov8":
+            presence_engine = "YOLOv8"
+            presence_loaded = True
+        elif mtype == "keras":
+            presence_engine = "Keras/TF"
+            presence_loaded = True
+
+    return {
+        "dot_engine": dot_engine,
+        "dot_loaded": dot_loaded,
+        "dot_model_exists": dot_model_exists,
+        "dot_model_path": dot_model_path,
+        "presence_engine": presence_engine,
+        "presence_loaded": presence_loaded,
+        "presence_model_exists": presence_model_exists,
+        "deps_ok": len(_missing_deps) == 0,
+        "missing_deps": _missing_deps,
+    }
+
+# ─── Fallback Warning Banner ─────────────────────────────────
+if PIPELINE_OK:
+    # Force init detectors so status is available
+    try:
+        _det = get_detector()
+        _dot_det_check = _det  # triggers _try_load_model
+    except Exception:
+        pass
+
+    status = _get_system_status()
+    if not status["dot_loaded"] and not status["presence_loaded"]:
+        st.warning(
+            "**YOLO model not loaded.** Running in heuristic mode only. "
+            "Accuracy may be reduced. Place trained weights in `models/` to enable AI detection."
+        )
+    if not status["dot_model_exists"]:
+        st.info("No trained dot-detection weights found at `models/braille_dots/braille_dots_yolov8.pt`")
+    if not status["presence_model_exists"]:
+        st.info("No trained presence weights found at `models/braille_presence/`")
 
 # ─── Helpers ──────────────────────────────────────────────────
 def _get_quality_kwargs():
@@ -195,7 +300,7 @@ def process_frame(frame, camera_image_ph, conf_badge_ph, trans_output_ph, speak_
     display_frame = draw_clean_overlay(frame, cells)
     display_frame = resize_for_display(display_frame, max_width=1000)
     
-    camera_image_ph.image(bgr_to_rgb(display_frame), use_container_width=True, channels="RGB")
+    camera_image_ph.image(bgr_to_rgb(display_frame), width="stretch", channels="RGB")
     
     if cells:
         if avg_conf >= 80: badge = "<div class='badge badge-high'>🟢 High confidence</div>"
@@ -225,6 +330,7 @@ def process_frame(frame, camera_image_ph, conf_badge_ph, trans_output_ph, speak_
 
     if det_result:
         dbg = getattr(det_result, 'heuristic_result', None)
+        model_used = getattr(det_result, 'model_used', 'unknown')
         if dbg:
             if cells:
                 st.session_state.analytics_data.append({
@@ -234,22 +340,35 @@ def process_frame(frame, camera_image_ph, conf_badge_ph, trans_output_ph, speak_
                     "dots": dot_c
                 })
             
+            # Get dot detector stats if available
+            _dot_det_stats = {}
+            if PIPELINE_OK and "_phase_e_dot_detector" in st.session_state:
+                _dd = st.session_state["_phase_e_dot_detector"]
+                _dot_mode = getattr(_dd, "mode", "opencv")
+            else:
+                _dot_mode = "opencv"
+
             debug_ph.markdown(f"""
             <div style='font-family:monospace; color:#94a3b8; display:flex; justify-content:space-between;'>
                 <div>
-                    <b>Heuristic Breakdown:</b><br>
-                    Raw contours: {dbg.raw_contour_count}<br>
-                    Accepted dots: {dbg.dot_count}<br>
-                    Rejected tiny: {getattr(dbg, 'rejected_tiny', 0)}<br>
-                    Rejected size: {getattr(dbg, 'rejected_size', 0)}<br>
+                    <b>Detection Metrics:</b><br>
+                    Candidate dots: {getattr(dbg, 'raw_contour_count', 0)}<br>
+                    Accepted dots: {getattr(dbg, 'dot_count', 0)}<br>
+                    Rejected dots: {getattr(dbg, 'rejected_tiny', 0) + getattr(dbg, 'rejected_size', 0)}<br>
+                    Braille cells: {len(cells)}<br>
                 </div>
                 <div>
-                    <b>Geometry & Timing:</b><br>
-                    Avg cell spacing: {dbg.avg_spacing:.1f} px<br>
+                    <b>Engine Status:</b><br>
+                    Detection mode: <b style='color:#38bdf8;'>{model_used}</b><br>
+                    Dot engine: <b style='color:#38bdf8;'>{_dot_mode}</b><br>
+                    Inference time: {process_time:.1f} ms<br>
+                    Loaded model: {model_used if model_used != 'heuristics_only' else 'None (heuristic)'}<br>
+                </div>
+                <div>
+                    <b>Geometry:</b><br>
+                    Avg spacing: {dbg.avg_spacing:.1f} px<br>
                     Grid valid: {dbg.grid_valid}<br>
                     Row count: {getattr(dbg, 'row_count', 'N/A')}<br>
-                    Detection timing: {process_time:.1f} ms<br>
-                    Phase: Phase D/E Pipeline<br>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -279,7 +398,7 @@ with tab_live:
                 process_frame(frame, *phs, is_live=True)
             else:
                 display_frame = resize_for_display(frame, max_width=1000)
-                phs[0].image(bgr_to_rgb(display_frame), use_container_width=True, channels="RGB")
+                phs[0].image(bgr_to_rgb(display_frame), width="stretch", channels="RGB")
                 
             time.sleep(0.04)
     else:
@@ -357,3 +476,49 @@ with tab_about:
 
     **Tech Stack:** Python · Streamlit · OpenCV · NumPy · pyttsx3 · YOLOv8
     """)
+
+    # ── System Status Panel ───────────────────────────────────
+    with st.expander("▼ System Status", expanded=True):
+        sys_status = _get_system_status()
+
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.markdown("**Detection Engines**")
+            st.markdown(f"- Dot Detection: **{sys_status['dot_engine']}**")
+            st.markdown(f"- Presence Detection: **{sys_status['presence_engine']}**")
+
+            st.markdown("**Model Files**")
+            dot_icon = "✅" if sys_status["dot_model_exists"] else "❌"
+            pres_icon = "✅" if sys_status["presence_model_exists"] else "❌"
+            st.markdown(f"- {dot_icon} `braille_dots_yolov8.pt`")
+            st.markdown(f"- {pres_icon} `braille_classifier.keras / braille_yolov8_cls.pt`")
+
+        with sc2:
+            st.markdown("**Model Loaded**")
+            dot_load_icon = "✅ Yes" if sys_status["dot_loaded"] else "❌ No"
+            pres_load_icon = "✅ Yes" if sys_status["presence_loaded"] else "❌ No"
+            st.markdown(f"- Dot model: **{dot_load_icon}**")
+            st.markdown(f"- Presence model: **{pres_load_icon}**")
+
+            st.markdown("**Dependencies**")
+            if sys_status["deps_ok"]:
+                st.markdown("- ✅ All dependencies OK")
+            else:
+                st.markdown(f"- ❌ Missing: {', '.join(sys_status['missing_deps'])}")
+
+            mode_label = "Live" if st.session_state.get("webcam_active", False) else "Upload"
+            st.markdown(f"**Current Mode:** {mode_label}")
+
+        if not sys_status["dot_model_exists"] and not sys_status["presence_model_exists"]:
+            st.warning(
+                "**No trained weights found.**\n\n"
+                "Expected structure:\n"
+                "```\n"
+                "models/\n"
+                "├── braille_dots/\n"
+                "│   └── braille_dots_yolov8.pt\n"
+                "└── braille_presence/\n"
+                "    └── braille_classifier.keras\n"
+                "```"
+            )
+

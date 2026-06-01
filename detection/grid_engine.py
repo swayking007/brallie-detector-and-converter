@@ -447,47 +447,131 @@ class BrailleGridEngine:
         """
         Builds standard BrailleCell objects directly from lattice grid cells.
         """
-        # Run process to compute lattice
-        confirmed, rejected, grid_cells, geo_conf = self.process(dots, np.zeros((10, 10)), 100, 100)
+        if not dots:
+            return []
+
+        # Estimate row/col spacings
+        coords = np.array([[d.x, d.y] for d in dots], dtype=float)
+        h_gaps = []
+        v_gaps = []
+        for i, pt in enumerate(coords):
+            dists = np.linalg.norm(coords - pt, axis=1)
+            dists[i] = np.inf
+            nearest = np.argsort(dists)[:4]
+            for idx in nearest:
+                d = dists[idx]
+                if d > 120.0 or d < 4.0:
+                    continue
+                dx = abs(coords[idx, 0] - pt[0])
+                dy = abs(coords[idx, 1] - pt[1])
+                if dx > dy:
+                    h_gaps.append(dx)
+                else:
+                    v_gaps.append(dy)
+
+        row_spacing = float(np.median(v_gaps)) if v_gaps else avg_spacing
+        col_spacing = float(np.median(h_gaps)) if h_gaps else avg_spacing
+        row_spacing = np.clip(row_spacing, 5.0, 50.0)
+        col_spacing = np.clip(col_spacing, 5.0, 50.0)
+
+        # Group dots using single-linkage clustering
+        clusters = []
+        used = [False] * len(dots)
+        cluster_threshold = 1.8 * max(row_spacing, col_spacing)
+
+        for i, dot in enumerate(dots):
+            if used[i]:
+                continue
+            cluster = [dot]
+            used[i] = True
+            queue = [dot]
+            while queue:
+                curr = queue.pop(0)
+                for j, other in enumerate(dots):
+                    if not used[j]:
+                        dist = math.hypot(curr.x - other.x, curr.y - other.y)
+                        if dist <= cluster_threshold:
+                            cluster.append(other)
+                            queue.append(other)
+                            used[j] = True
+            clusters.append(cluster)
 
         cells: List[BrailleCell] = []
-        for gc in grid_cells:
-            # Build 6-digit binary pattern
-            bin_chars = []
-            valid_dots = []
-            for d in gc.confirmed:
-                if d is not None:
-                    bin_chars.append('1')
-                    valid_dots.append(d)
-                else:
-                    bin_chars.append('0')
-            binary_pattern = "".join(bin_chars)
-
-            if binary_pattern == "000000":
+        for cluster in clusters:
+            if len(cluster) < 2:
                 continue
 
-            # Compute bounding box
-            xs = [x for x, y in gc.slot_pts]
-            ys = [y for x, y in gc.slot_pts]
-            x_min, y_min = min(xs), min(ys)
-            x_max, y_max = max(xs), max(ys)
-            w = max(10, int(x_max - x_min))
-            h = max(20, int(y_max - y_min))
+            min_x = min(d.x for d in cluster)
+            min_y = min(d.y for d in cluster)
 
-            # Score individual cell confidence
-            filled_ratio = len(valid_dots) / 6.0
-            emboss_score = float(np.mean([d.confidence for d in valid_dots])) if valid_dots else 0.0
-            confidence = 0.6 * filled_ratio + 0.4 * emboss_score
+            best_error = 1e9
+            best_anchor = (min_x, min_y)
+            best_mapping = {}
+
+            for c_off in [0, 1]:
+                for r_off in [0, 1, 2]:
+                    anchor_x = min_x - c_off * col_spacing
+                    anchor_y = min_y - r_off * row_spacing
+
+                    error = 0.0
+                    mapping = {}
+                    for idx, dot in enumerate(cluster):
+                        c_idx = int(round((dot.x - anchor_x) / col_spacing))
+                        r_idx = int(round((dot.y - anchor_y) / row_spacing))
+
+                        c_idx = max(0, min(1, c_idx))
+                        r_idx = max(0, min(2, r_idx))
+
+                        slot = c_idx * 3 + r_idx
+                        slot_x = anchor_x + c_idx * col_spacing
+                        slot_y = anchor_y + r_idx * row_spacing
+
+                        dist = math.hypot(dot.x - slot_x, dot.y - slot_y)
+                        error += dist * dist
+                        mapping[idx] = slot
+
+                    if error < best_error:
+                        best_error = error
+                        best_anchor = (anchor_x, anchor_y)
+                        best_mapping = mapping
+
+            avg_fit_error = math.sqrt(best_error / len(cluster))
+            if avg_fit_error > 0.45 * max(row_spacing, col_spacing):
+                continue
+
+            anchor_x, anchor_y = best_anchor
+
+            pattern = ['0'] * 6
+            cell_dots = [None] * 6
+            for idx, dot in enumerate(cluster):
+                slot = best_mapping[idx]
+                pattern[slot] = '1'
+                cell_dots[slot] = dot
+
+            binary_pattern = "".join(pattern)
+            if binary_pattern == "000000":
+                continue
 
             from translation.braille_mapper import translate_binary_pattern
             char = translate_binary_pattern(binary_pattern)
 
+            w = max(15, int(col_spacing + 12))
+            h = max(25, int(2 * row_spacing + 12))
+
+            cell_w = max(d.x for d in cluster) - min(d.x for d in cluster)
+            cell_h = max(d.y for d in cluster) - min(d.y for d in cluster)
+            if cell_w > 3.0 * col_spacing or cell_h > 4.0 * row_spacing:
+                continue
+
+            filled_ratio = len(cluster) / 6.0
+            confidence = 0.6 * filled_ratio + 0.4
+
             cells.append(BrailleCell(
-                x=int(x_min),
-                y=int(y_min),
+                x=int(anchor_x),
+                y=int(anchor_y),
                 w=w,
                 h=h,
-                dots=valid_dots,
+                dots=[d for d in cell_dots if d is not None],
                 binary_pattern=binary_pattern,
                 translated_char=char,
                 confidence=confidence,

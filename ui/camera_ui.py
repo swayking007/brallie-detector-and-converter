@@ -405,9 +405,9 @@ def render_camera_controls() -> Tuple[bool, bool, bool]:
         (start_clicked, stop_clicked, snapshot_clicked)
     """
     c1, c2, c3 = st.columns(3)
-    start_btn    = c1.button("▶️ Start Camera",    use_container_width=True, type="primary")
-    stop_btn     = c2.button("⏹️ Stop Camera",     use_container_width=True)
-    snapshot_btn = c3.button("📸 Capture Snapshot", use_container_width=True)
+    start_btn    = c1.button("▶️ Start Camera",    width="stretch", type="primary")
+    stop_btn     = c2.button("⏹️ Stop Camera",     width="stretch")
+    snapshot_btn = c3.button("📸 Capture Snapshot", width="stretch")
     return start_btn, stop_btn, snapshot_btn
 
 
@@ -493,7 +493,7 @@ def render_snapshot_gallery(limit: int = 6):
         col = cols[idx % 3]
         try:
             img = Image.open(path)
-            col.image(img, caption=path.name, use_container_width=True)
+            col.image(img, caption=path.name, width="stretch")
         except Exception:
             col.warning(f"Could not load {path.name}")
 
@@ -515,6 +515,6 @@ def render_upload_gallery(limit: int = 6):
         col = cols[idx % 3]
         try:
             img = Image.open(path)
-            col.image(img, caption=path.name, use_container_width=True)
+            col.image(img, caption=path.name, width="stretch")
         except Exception:
             col.warning(f"Could not load {path.name}")

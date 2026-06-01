@@ -155,7 +155,7 @@ def render_process_button(disabled: bool = True) -> bool:
     """
     return st.button(
         "🔍 Detect & Translate Braille",
-        use_container_width=True,
+        width="stretch",
         type="primary",
         disabled=disabled,
         help="Available after Phase C & D integration.",
@@ -199,8 +199,8 @@ def render_voice_controls(disabled: bool = True):
     """
     st.markdown("### 🔊 Voice Output")
     col1, col2 = st.columns(2)
-    col1.button("▶️ Speak", use_container_width=True, disabled=disabled)
-    col2.button("⏹️ Stop", use_container_width=True, disabled=disabled)
+    col1.button("▶️ Speak", width="stretch", disabled=disabled)
+    col2.button("⏹️ Stop", width="stretch", disabled=disabled)
 
 
 def render_braille_cells_visualization(cells: Optional[List] = None):

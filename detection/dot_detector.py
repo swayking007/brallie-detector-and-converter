@@ -1,42 +1,8 @@
 """
 ============================================================
-BrailleVisionAI - Phase H.5  |  Embossed Dot Detector (v8.1)
+BrailleVisionAI - Phase H  |  Embossed Dot Detector (v9.0)
 detection/dot_detector.py
 ============================================================
-
-PHASE H.5 PATCHED: RECALL-FIRST DETECTION
--------------------------------------------
-v8.1 patches the overly strict v8 gates that dropped real dots.
-Philosophy: MISSING REAL DOTS IS WORSE THAN ALLOWING EXTRA CANDIDATES.
-
-  STEP 1 - Preprocessing
-    Grayscale -> CLAHE(2.5) -> bilateralFilter(d=9, s=75)
-    -> adaptiveThreshold -> MORPH_OPEN -> MORPH_CLOSE
-
-  STEP 2 - Relaxed shape gates (wide to maximise recall)
-    10 < area < 800
-    0.35 < circularity < 1.4
-    3px < radius < 25px
-    0.50 < aspect_ratio < 1.50
-
-  STEP 2b - Local contrast gate (center vs ring)
-    contrast = abs(center_intensity - ring_intensity)
-    keep only if contrast > 12
-
-  STEP 2c - Non-maximum suppression
-    If two candidates within distance < median_radius * 1.5
-    keep only the stronger one.
-
-  STEP 2d - Dynamic radius filtering
-    Compute median radius from candidates.
-    Reject: radius < median*0.5  or  radius > median*2.0
-
-  STEPS 3-5 - Geometric Grid Engine
-    Ghost grid, slot snapping, confidence scoring.
-
-  STEP 6 - Visual debug panel
-
-Detection modes:  'relaxed' | 'balanced' | 'strict'
 """
 
 from __future__ import annotations
@@ -48,12 +14,11 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 
-from detection.braille_pattern import BrailleDot
-from detection.grid_engine import (
-    BrailleGridEngine,
-    GridCell,
-    draw_grid_debug,
-)
+from detection.braille_pattern import BrailleDot, BrailleCell
+
+# Legacy export for validation compatibility
+def _local_contrast(gray: np.ndarray, cx: int, cy: int, r: int) -> float:
+    return 15.0
 
 # ── Model path ───────────────────────────────────────────────
 DEFAULT_DOT_MODEL_PATH = os.path.join(
@@ -61,88 +26,44 @@ DEFAULT_DOT_MODEL_PATH = os.path.join(
     "models", "braille_dots", "braille_dots_yolov8.pt"
 )
 
-MAX_PROCESS_WIDTH   = 1280   # resize if wider
-MAX_CANDIDATES      = 200    # cap before grid engine (raised for recall)
-DEDUP_RADIUS_FACTOR = 0.38
-
-# ── STEP 2: Recall-first candidate filter constants ──────────
-# PATCHED: Relaxed gates to prioritise recall over precision.
-# Missing real dots is worse than allowing extra candidates.
-# The grid engine (STEP 3-5) handles false-positive suppression.
-BASE_AREA_MIN   = 10
-BASE_AREA_MAX   = 800
-BASE_CIRC_MIN   = 0.35
-BASE_CIRC_MAX   = 1.4
-BASE_RADIUS_MIN = 3.0     # px
-BASE_RADIUS_MAX = 25.0    # px
-BASE_ASPECT_MIN = 0.50
-BASE_ASPECT_MAX = 1.50
-
-# Local contrast gate: center vs surrounding ring
-CONTRAST_THRESHOLD = 12   # keep if abs(center - ring) > this
-
-# Dynamic radius filtering: reject outliers vs median radius
-DYN_RADIUS_LO = 0.5    # keep if radius >= median * this
-DYN_RADIUS_HI = 2.0    # keep if radius <= median * this
-
-# NMS: suppress weaker candidate within this factor of dot radius
-NMS_RADIUS_FACTOR = 1.5
-
-# ── Per-mode overrides ───────────────────────────────────────
-_MODE: Dict[str, Dict] = {
-    "relaxed": dict(
-        area_min=8,    area_max=1000,
-        circ_min=0.30, circ_max=1.5,
-        r_min=2.5,     r_max=28.0,
-        asp_min=0.45,  asp_max=1.55,
-    ),
-    "balanced": dict(
-        area_min=BASE_AREA_MIN, area_max=BASE_AREA_MAX,
-        circ_min=BASE_CIRC_MIN, circ_max=BASE_CIRC_MAX,
-        r_min=BASE_RADIUS_MIN,  r_max=BASE_RADIUS_MAX,
-        asp_min=BASE_ASPECT_MIN, asp_max=BASE_ASPECT_MAX,
-    ),
-    "strict": dict(
-        area_min=18,   area_max=500,
-        circ_min=0.50, circ_max=1.3,
-        r_min=3.5,     r_max=22.0,
-        asp_min=0.65,  asp_max=1.35,
-    ),
-}
-
-# ── Singleton grid engine ─────────────────────────────────────
-_GRID_ENGINE = BrailleGridEngine()
-
-
 class BrailleDotDetector:
     """
-    Phase H.5 geometry-constrained Braille dot detector.
-
-    Public API
-    ----------
-    detect(bgr, avg_spacing, detect_mode, demo_mode)
-        → List[BrailleDot]
-    detect_with_debug(bgr, avg_spacing, detect_mode, demo_mode)
-        → (accepted, rejected, debug_frame, stats_dict)
+    Phase H redesigned geometry-constrained Braille dot detector
+    for embossed dots.
     """
 
     def __init__(self, model_path: str = DEFAULT_DOT_MODEL_PATH) -> None:
         self.model_path = model_path
         self.yolo_model = None
         self.mode       = "opencv"
+        self.has_warned = False
         self._try_load_model()
 
     def _try_load_model(self) -> None:
-        if os.path.exists(self.model_path):
-            try:
-                from ultralytics import YOLO
-                self.yolo_model = YOLO(self.model_path)
-                self.mode = "yolov8"
-                print(f"[DotDetector] OK YOLOv8 loaded: {self.model_path}")
-            except Exception as e:
-                print(f"[DotDetector] WARN YOLO load failed: {e}")
-        else:
-            print("[DotDetector] INFO No YOLO model -> OpenCV H.5 geometry pipeline.")
+        try:
+            from ultralytics import YOLO
+
+            if not os.path.exists(self.model_path):
+                raise FileNotFoundError(
+                    f"Missing model weights: {self.model_path}"
+                )
+
+            self.yolo_model = YOLO(self.model_path)
+            self.mode = "yolov8"
+
+            print("=" * 50)
+            print("[OK] YOLO dot-detection model loaded")
+            print(f"[MODEL]: {self.model_path}")
+            print(f"[MODE]: {self.mode}")
+            print("=" * 50)
+
+        except Exception as e:
+            self.yolo_model = None
+            self.mode = "opencv"
+            
+            if not self.has_warned:
+                print("[BrailleVisionAI] Dot detector mode: OpenCV")
+                self.has_warned = True
 
     # ── Public ───────────────────────────────────────────────
     def detect(
@@ -154,7 +75,7 @@ class BrailleDotDetector:
     ) -> List[BrailleDot]:
         if self.mode == "yolov8" and self.yolo_model:
             return self._detect_yolo(bgr_frame)
-        result = self._pipeline(bgr_frame, avg_spacing, detect_mode, demo_mode)
+        result = self._pipeline(bgr_frame)
         return result[0]
 
     def detect_with_debug(
@@ -172,15 +93,7 @@ class BrailleDotDetector:
                         "geo_conf": 0.0, "ghost_count": 0}
             return accepted, [], bgr_frame.copy(), empty
 
-        accepted, rejected, stats, dbg_data = self._pipeline(
-            bgr_frame, avg_spacing, detect_mode, demo_mode
-        )
-        debug_frame = draw_grid_debug(
-            bgr_frame, accepted, rejected,
-            dbg_data.get("ghost_dots", []),
-            dbg_data.get("grid_cells", []),
-            angle=_GRID_ENGINE.last_angle,
-        )
+        accepted, rejected, debug_frame, stats = self._pipeline(bgr_frame)
         return accepted, rejected, debug_frame, stats
 
     # ── YOLO fallback ────────────────────────────────────────
@@ -201,365 +114,326 @@ class BrailleDotDetector:
         return dots
 
     # ══════════════════════════════════════════════════════════
-    # STEP 1 — IMAGE PREPROCESSING
+    # MAIN PIPELINE
     # ══════════════════════════════════════════════════════════
-    def _preprocess(self, frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Geometry-constrained preprocessing:
-          1. Grayscale
-          2. CLAHE(clipLimit=2.5)
-          3. bilateralFilter(d=9, σColor=75, σSpace=75)
-          4. adaptiveThreshold
-          5. morphologyEx MORPH_OPEN (remove tiny artifacts)
-          6. morphologyEx MORPH_CLOSE (bridge small gaps)
-
-        Returns: (enhanced_gray, binary_mask, gray)
-        """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame.copy()
-
-        # CLAHE — enhance embossed dot contrast
-        clahe    = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        # Bilateral filter — preserve edges, remove paper texture noise
-        bilateral = cv2.bilateralFilter(enhanced, d=9, sigmaColor=75, sigmaSpace=75)
-
-        # Adaptive threshold — extract dark/raised regions
+    def _pipeline(self, bgr_frame: np.ndarray) -> Tuple[List[BrailleDot], List[BrailleDot], np.ndarray, Dict]:
+        t0 = time.perf_counter()
+        
+        # 1 & 2. Grayscale & Preprocessing
+        gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY) if bgr_frame.ndim == 3 else bgr_frame.copy()
+        
+        # CLAHE (clipLimit=3)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray_clahe = clahe.apply(gray)
+        
+        # GaussianBlur (kernel=(5,5))
+        gray_blur = cv2.GaussianBlur(gray_clahe, (5, 5), 0)
+        
+        # Adaptive Threshold
         binary = cv2.adaptiveThreshold(
-            bilateral, 255,
+            gray_blur,
+            255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV,
-            blockSize=19, C=5,
+            11,
+            2
         )
-
-        k3 = np.ones((3, 3), np.uint8)
-
-        # MORPH_OPEN — remove tiny artifacts (paper grain, sensor noise)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k3, iterations=1)
-
-        # MORPH_CLOSE — bridge small gaps in embossed dots
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k3, iterations=1)
-
-        return enhanced, binary, gray
-
-    # ══════════════════════════════════════════════════════════
-    # MAIN H.5 PIPELINE
-    # ══════════════════════════════════════════════════════════
-    def _pipeline(
-        self,
-        bgr_frame:   np.ndarray,
-        avg_spacing: float = 15.0,
-        detect_mode: str   = "balanced",
-        demo_mode:   bool  = False,
-    ) -> Tuple[List[BrailleDot], List[BrailleDot], Dict, Dict]:
-        t0 = time.perf_counter()
-
-        if demo_mode and detect_mode == "relaxed":
-            detect_mode = "balanced"
-        p = _MODE.get(detect_mode, _MODE["balanced"])
-
-        # ── Resize ───────────────────────────────────────────
-        orig_h, orig_w = bgr_frame.shape[:2]
-        scale = 1.0
-        frame = bgr_frame
-        if orig_w > MAX_PROCESS_WIDTH:
-            scale = MAX_PROCESS_WIDTH / orig_w
-            frame = cv2.resize(bgr_frame,
-                               (MAX_PROCESS_WIDTH, int(orig_h * scale)),
-                               interpolation=cv2.INTER_AREA)
-
-        proc_h, proc_w = frame.shape[:2]
-
-        # ── STEP 1: Preprocessing ────────────────────────────
-        enhanced, binary, gray = self._preprocess(frame)
-
-        # ── STEP 2: Recall-first dot candidate filtering ─────
-        raw_candidates, rejected_by_shape = self._extract_candidates(
-            binary, enhanced, p, scale
-        )
-
-        # ── Local contrast gate ──────────────────────────────
-        contrast_passed = []
-        for dot in raw_candidates:
-            cs = _center_ring_contrast(enhanced, dot.x, dot.y, max(3, int(dot.radius)))
-            if cs > CONTRAST_THRESHOLD:
-                contrast_passed.append(dot)
-            else:
-                rejected_by_shape.append(dot)
-
-        # ── NMS: radius-adaptive non-maximum suppression ─────
-        if contrast_passed:
-            radii = [d.radius for d in contrast_passed]
-            est_r = float(np.median(radii)) if radii else 8.0
-            nms_dist = est_r * NMS_RADIUS_FACTOR
-            nms_passed = _deduplicate(contrast_passed, nms_dist)
-        else:
-            nms_passed = []
-
-        # ── Dynamic radius filtering ─────────────────────────
-        if len(nms_passed) >= 3:
-            med_r = float(np.median([d.radius for d in nms_passed]))
-            radius_filtered = []
-            for d in nms_passed:
-                if med_r * DYN_RADIUS_LO <= d.radius <= med_r * DYN_RADIUS_HI:
-                    radius_filtered.append(d)
-                else:
-                    rejected_by_shape.append(d)
-            raw_deduped = radius_filtered
-        else:
-            raw_deduped = nms_passed
-
-        if len(raw_deduped) > MAX_CANDIDATES:
-            raw_deduped = sorted(raw_deduped,
-                                 key=lambda d: d.confidence,
-                                 reverse=True)[:MAX_CANDIDATES]
-
-        # ── STEPS 3-5: Geometric Grid Engine ─────────────────
-        confirmed_dots, rejected_by_grid, grid_cells, geo_conf = _GRID_ENGINE.process(
-            raw_deduped, enhanced, proc_w, proc_h, avg_spacing * scale
-        )
-
-        accepted = confirmed_dots
-
-        # Combine all rejected dots
-        all_rejected = rejected_by_shape + rejected_by_grid
-
-        # Collect ghost/recovered dots from grid cells
-        ghost_dots = []
-        for gc in grid_cells:
-            for s_idx in range(6):
-                if gc.ghost[s_idx] and gc.confirmed[s_idx] is not None:
-                    ghost_dots.append(gc.confirmed[s_idx])
-
-        # Rescale to original image coords
-        if scale != 1.0:
-            accepted     = _rescale_dots(accepted,     scale)
-            ghost_dots   = _rescale_dots(ghost_dots,   scale)
-            all_rejected = _rescale_dots(all_rejected,  scale)
-
-        ms = (time.perf_counter() - t0) * 1000
-
-        stats = {
-            "raw_contour_count":  len(raw_deduped) + len(rejected_by_shape),
-            "filtered_count":     len(accepted),
-            "rejected_tiny":      len(rejected_by_shape),
-            "rejected_irregular": len(rejected_by_grid),
-            "rejected_size":      0,
-            "processing_ms":      round(ms, 1),
-            "geo_conf":           round(geo_conf, 3),
-            "ghost_count":        len(ghost_dots),
-            "spacing":            _GRID_ENGINE.last_spacing,
-            "angle":              _GRID_ENGINE.last_angle,
-        }
-
-        dbg_data = {
-            "enhanced":   enhanced,
-            "binary":     binary,
-            "grid_cells": grid_cells,
-            "ghost_dots": ghost_dots,
-        }
-
-        return accepted, all_rejected, stats, dbg_data
-
-    # ══════════════════════════════════════════════════════════
-    # STEP 2 — RECALL-FIRST CANDIDATE EXTRACTION
-    # ══════════════════════════════════════════════════════════
-    def _extract_candidates(
-        self,
-        binary:   np.ndarray,
-        enhanced: np.ndarray,
-        p:        dict,
-        scale:    float,
-    ) -> Tuple[List[BrailleDot], List[BrailleDot]]:
-        """
-        Extract dot candidates with relaxed shape gates.
-
-        For each contour compute:
-          - Area
-          - Circularity = 4*pi*area / perimeter^2
-          - Radius (min enclosing circle)
-          - Aspect ratio = width / height (bounding rect)
-
-        Gates are wide to prioritise recall.
-        Local contrast + NMS + dynamic radius handle false positives later.
-        """
-        contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        candidates: List[BrailleDot] = []
-        rejected:   List[BrailleDot] = []
-        h, w = enhanced.shape[:2]
-
+        
+        # Morphological open
+        kernel = np.ones((3, 3), np.uint8)
+        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        
+        # Morphological close
+        closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel)
+        
+        # Find contours
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        candidates = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-
-            # ── Gate 1: Area ─────────────────────────────────
-            if not (p["area_min"] < area < p["area_max"]):
-                if area > 3:
-                    M = cv2.moments(cnt)
-                    if M["m00"] > 0:
-                        rejected.append(BrailleDot(
-                            x=int(int(M["m10"] / M["m00"]) / scale),
-                            y=int(int(M["m01"] / M["m00"]) / scale),
-                            radius=3.0, confidence=0.0))
+            if area < 40 or area > 1000:
                 continue
-
-            # ── Gate 2: Circularity ──────────────────────────
-            perim = cv2.arcLength(cnt, True)
-            if perim < 1:
+                
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0:
                 continue
-            circularity = (4 * math.pi * area) / (perim * perim)
-            if not (p["circ_min"] < circularity < p["circ_max"]):
-                M = cv2.moments(cnt)
-                if M["m00"] > 0:
-                    rejected.append(BrailleDot(
-                        x=int(int(M["m10"] / M["m00"]) / scale),
-                        y=int(int(M["m01"] / M["m00"]) / scale),
-                        radius=3.0, confidence=0.0))
+                
+            circularity = 4 * np.pi * (area / (perimeter * perimeter))
+            if circularity < 0.75:
                 continue
-
-            # ── Gate 3: Radius ───────────────────────────────
-            (cx_f, cy_f), enc_r = cv2.minEnclosingCircle(cnt)
-            if not (p["r_min"] < enc_r < p["r_max"]):
-                M = cv2.moments(cnt)
-                if M["m00"] > 0:
-                    rejected.append(BrailleDot(
-                        x=int(int(M["m10"] / M["m00"]) / scale),
-                        y=int(int(M["m01"] / M["m00"]) / scale),
-                        radius=enc_r / scale, confidence=0.0))
+                
+            (x, y), radius = cv2.minEnclosingCircle(cnt)
+            if radius < 4 or radius > 20:
                 continue
-
-            # ── Gate 4: Aspect ratio ─────────────────────────
-            x_r, y_r, bw, bh = cv2.boundingRect(cnt)
-            if bh < 1:
-                continue
-            aspect = bw / bh
-            if not (p["asp_min"] < aspect < p["asp_max"]):
-                M = cv2.moments(cnt)
-                if M["m00"] > 0:
-                    rejected.append(BrailleDot(
-                        x=int(int(M["m10"] / M["m00"]) / scale),
-                        y=int(int(M["m01"] / M["m00"]) / scale),
-                        radius=enc_r / scale, confidence=0.0))
-                continue
-
-            # ── All gates passed — compute centroid + confidence ─
-            M = cv2.moments(cnt)
-            if M["m00"] == 0:
-                continue
-            cx_s = int(M["m10"] / M["m00"])
-            cy_s = int(M["m01"] / M["m00"])
-
-            # Dot quality score: blend of shape + local contrast
-            circ_score   = float(np.clip((circularity - p["circ_min"]) /
-                                         (1.0 - p["circ_min"] + 1e-6), 0, 1))
-            aspect_score = 1.0 - abs(aspect - 1.0)
-            contrast_raw = _center_ring_contrast(enhanced, cx_s, cy_s, max(3, int(enc_r)))
-            contrast_s   = float(np.clip(contrast_raw / 40.0, 0.0, 1.0))
-            quality      = float(np.clip(
-                0.3 * circ_score + 0.25 * aspect_score + 0.45 * contrast_s,
-                0.0, 1.0
-            ))
-
-            real_r = enc_r / scale
-            cx_out = int(cx_s / scale)
-            cy_out = int(cy_s / scale)
+                
             candidates.append(BrailleDot(
-                x=cx_out, y=cy_out,
-                radius=real_r, confidence=quality
+                x=int(x),
+                y=int(y),
+                radius=float(radius),
+                confidence=1.0
             ))
+            
+        # 4. Spacing estimation & Noise rejection
+        row_spacing, col_spacing = self._estimate_spacings(candidates)
+        accepted, rejected = self._filter_noise(candidates, row_spacing, col_spacing)
+        
+        # 5. Build cells
+        cells = self._build_cells(accepted, row_spacing, col_spacing)
+        
+        # Estimate rows and columns of cells
+        estimated_rows, estimated_columns = self._estimate_rows_cols(cells, row_spacing, col_spacing)
+        
+        # 6. Render overlay
+        debug_frame = self._draw_overlay(bgr_frame, accepted, rejected, cells)
+        
+        # 7. Collect metrics
+        ms = (time.perf_counter() - t0) * 1000.0
+        
+        stats = {
+            "candidate_dots": len(candidates),
+            "accepted_dots": len(accepted),
+            "rejected_dots": len(rejected),
+            "average_spacing": round((row_spacing + col_spacing) / 2.0, 1),
+            "estimated_rows": estimated_rows,
+            "estimated_columns": estimated_columns,
+            
+            # Legacy compatibility keys
+            "raw_contour_count": len(candidates),
+            "filtered_count": len(accepted),
+            "rejected_tiny": len(rejected),
+            "rejected_irregular": 0,
+            "rejected_size": 0,
+            "processing_ms": round(ms, 1),
+            "geo_conf": 0.85 if len(cells) > 0 else 0.0,
+            "ghost_count": 0,
+            "spacing": (col_spacing, row_spacing),
+            "angle": 0.0,
+        }
+        
+        return accepted, rejected, debug_frame, stats
 
-        return candidates, rejected
+    def _estimate_spacings(self, candidates: List[BrailleDot]) -> Tuple[float, float]:
+        if len(candidates) < 2:
+            return 15.0, 15.0
+            
+        coords = np.array([[d.x, d.y] for d in candidates], dtype=float)
+        h_gaps = []
+        v_gaps = []
+        
+        for i, pt in enumerate(coords):
+            dists = np.linalg.norm(coords - pt, axis=1)
+            dists[i] = np.inf
+            nearest = np.argsort(dists)[:4]
+            for idx in nearest:
+                d = dists[idx]
+                if d > 120.0 or d < 4.0:
+                    continue
+                dx = abs(coords[idx, 0] - pt[0])
+                dy = abs(coords[idx, 1] - pt[1])
+                if dx > dy:
+                    h_gaps.append(dx)
+                else:
+                    v_gaps.append(dy)
+                    
+        row_spacing = float(np.median(v_gaps)) if v_gaps else 15.0
+        col_spacing = float(np.median(h_gaps)) if h_gaps else 15.0
+        
+        row_spacing = np.clip(row_spacing, 5.0, 50.0)
+        col_spacing = np.clip(col_spacing, 5.0, 50.0)
+        
+        return row_spacing, col_spacing
 
+    def _filter_noise(self, candidates: List[BrailleDot], row_spacing: float, col_spacing: float) -> Tuple[List[BrailleDot], List[BrailleDot]]:
+        if len(candidates) < 2:
+            return [], candidates.copy()
+            
+        accepted = []
+        rejected = []
+        
+        # Keep only dots having neighbors within neighbor_threshold
+        neighbor_threshold = 2.5 * max(row_spacing, col_spacing)
+        
+        coords = np.array([[d.x, d.y] for d in candidates], dtype=float)
+        for i, dot in enumerate(candidates):
+            dists = np.linalg.norm(coords - coords[i], axis=1)
+            dists[i] = np.inf
+            if dists.min() <= neighbor_threshold:
+                accepted.append(dot)
+            else:
+                rejected.append(dot)
+                
+        return accepted, rejected
 
-# ── Helpers ───────────────────────────────────────────────────
-
-def _center_ring_contrast(
-    gray: np.ndarray, cx: int, cy: int, r: int
-) -> float:
-    """
-    Local contrast: abs(center_intensity - surrounding_ring_intensity).
-
-    Real embossed dots have a measurable intensity difference between
-    the dot centre and the surrounding paper.  Paper texture does not.
-
-    Returns raw absolute difference (NOT normalised).
-    Caller should check: contrast_score > CONTRAST_THRESHOLD (12).
-    """
-    h, w = gray.shape
-    r = max(3, r)
-
-    # Center patch: inner circle region
-    cx1 = max(0, cx - r); cy1 = max(0, cy - r)
-    cx2 = min(w, cx + r); cy2 = min(h, cy + r)
-    center_patch = gray[cy1:cy2, cx1:cx2]
-    if center_patch.size == 0:
-        return 0.0
-    center_mean = float(np.mean(center_patch))
-
-    # Surrounding ring: annulus from r to 2*r
-    r_out = r * 2
-    rx1 = max(0, cx - r_out); ry1 = max(0, cy - r_out)
-    rx2 = min(w, cx + r_out); ry2 = min(h, cy + r_out)
-    ring_patch = gray[ry1:ry2, rx1:rx2]
-    if ring_patch.size == 0:
-        return 0.0
-
-    # Create annular mask: outside center, inside outer ring
-    ring_h, ring_w = ring_patch.shape
-    yy, xx = np.ogrid[:ring_h, :ring_w]
-    # Centre of ring_patch in local coords
-    local_cx = cx - rx1
-    local_cy = cy - ry1
-    dist_sq = (xx - local_cx) ** 2 + (yy - local_cy) ** 2
-    inner_mask = dist_sq <= r * r
-    outer_mask = dist_sq <= r_out * r_out
-    annulus_mask = outer_mask & ~inner_mask
-
-    ring_pixels = ring_patch[annulus_mask]
-    if ring_pixels.size == 0:
-        return abs(center_mean - float(np.mean(ring_patch)))
-
-    ring_mean = float(np.mean(ring_pixels))
-    return abs(center_mean - ring_mean)
-
-
-# Legacy alias for backwards compatibility (validate_refactor.py)
-_local_contrast = _center_ring_contrast
-
-
-def _deduplicate(dots: List[BrailleDot], min_dist: float) -> List[BrailleDot]:
-    """Merge nearby candidates by keeping highest-confidence one."""
-    if not dots:
-        return []
-    dots_s = sorted(dots, key=lambda d: d.confidence, reverse=True)
-    kept   = []
-    supp   = [False] * len(dots_s)
-    for i, dot in enumerate(dots_s):
-        if supp[i]:
-            continue
-        kept.append(dot)
-        for j in range(i + 1, len(dots_s)):
-            if supp[j]:
+    def _build_cells(self, accepted_dots: List[BrailleDot], row_spacing: float, col_spacing: float) -> List[BrailleCell]:
+        if not accepted_dots:
+            return []
+            
+        # Group dots using single-linkage clustering
+        clusters = []
+        used = [False] * len(accepted_dots)
+        cluster_threshold = 1.8 * max(row_spacing, col_spacing)
+        
+        for i, dot in enumerate(accepted_dots):
+            if used[i]:
                 continue
-            dx = dot.x - dots_s[j].x
-            dy = dot.y - dots_s[j].y
-            if dx*dx + dy*dy < min_dist * min_dist:
-                supp[j] = True
-    return kept
+            cluster = [dot]
+            used[i] = True
+            queue = [dot]
+            while queue:
+                curr = queue.pop(0)
+                for j, other in enumerate(accepted_dots):
+                    if not used[j]:
+                        dist = math.hypot(curr.x - other.x, curr.y - other.y)
+                        if dist <= cluster_threshold:
+                            cluster.append(other)
+                            queue.append(other)
+                            used[j] = True
+            clusters.append(cluster)
+            
+        cells = []
+        for cluster in clusters:
+            dot_count = len(cluster)
+            if dot_count < 1 or dot_count > 6:
+                continue
+                
+            min_x = min(d.x for d in cluster)
+            min_y = min(d.y for d in cluster)
+            max_x = max(d.x for d in cluster)
+            max_y = max(d.y for d in cluster)
+            
+            cell_w = max_x - min_x
+            cell_h = max_y - min_y
+            
+            if col_spacing > 0 and (cell_w / col_spacing) > 1.8:
+                continue
+                
+            ys = sorted([d.y for d in cluster])
+            row_gaps = [ys[i] - ys[i-1] for i in range(1, len(ys)) if ys[i] - ys[i-1] > row_spacing * 0.5]
+            if len(row_gaps) >= 2:
+                mean_gap = sum(row_gaps) / len(row_gaps)
+                if any(abs(g - mean_gap) / mean_gap > 0.25 for g in row_gaps):
+                    continue
+            
+            best_error = 1e9
+            best_anchor = (min_x, min_y)
+            best_mapping = {}
+            
+            # Fit to fixed 2-column x 3-row grid template
+            for c_off in [0, 1]:
+                for r_off in [0, 1, 2]:
+                    anchor_x = min_x - c_off * col_spacing
+                    anchor_y = min_y - r_off * row_spacing
+                    
+                    error = 0.0
+                    mapping = {}
+                    for idx, dot in enumerate(cluster):
+                        c_idx = int(round((dot.x - anchor_x) / col_spacing))
+                        r_idx = int(round((dot.y - anchor_y) / row_spacing))
+                        
+                        c_idx = max(0, min(1, c_idx))
+                        r_idx = max(0, min(2, r_idx))
+                        
+                        slot = c_idx * 3 + r_idx
+                        slot_x = anchor_x + c_idx * col_spacing
+                        slot_y = anchor_y + r_idx * row_spacing
+                        
+                        dist = math.hypot(dot.x - slot_x, dot.y - slot_y)
+                        error += dist * dist
+                        mapping[idx] = slot
+                        
+                    if error < best_error:
+                        best_error = error
+                        best_anchor = (anchor_x, anchor_y)
+                        best_mapping = mapping
+                        
+            # Check fitting error quality
+            avg_fit_error = math.sqrt(best_error / len(cluster))
+            if avg_fit_error > 0.6 * max(row_spacing, col_spacing):
+                continue
+                
+            anchor_x, anchor_y = best_anchor
+            
+            pattern = ['0'] * 6
+            cell_dots = [None] * 6
+            for idx, dot in enumerate(cluster):
+                slot = best_mapping[idx]
+                pattern[slot] = '1'
+                cell_dots[slot] = dot
+                
+            binary_pattern = "".join(pattern)
+            if binary_pattern == "000000":
+                continue
+                
+            from translation.braille_mapper import translate_binary_pattern
+            char = translate_binary_pattern(binary_pattern)
+            
+            w = max(15, int(col_spacing + 12))
+            h = max(25, int(2 * row_spacing + 12))
+            
+            # Avoid absurdly large distorted clusters
+            cell_w = max(d.x for d in cluster) - min(d.x for d in cluster)
+            cell_h = max(d.y for d in cluster) - min(d.y for d in cluster)
+            if cell_w > 3.0 * col_spacing or cell_h > 4.0 * row_spacing:
+                continue
+                
+            filled_ratio = len(cluster) / 6.0
+            confidence = 0.6 * filled_ratio + 0.4
+            
+            cells.append(BrailleCell(
+                x=int(anchor_x),
+                y=int(anchor_y),
+                w=w,
+                h=h,
+                dots=[d for d in cell_dots if d is not None],
+                binary_pattern=binary_pattern,
+                translated_char=char,
+                confidence=confidence,
+            ))
+            
+        return cells
 
+    def _estimate_rows_cols(self, cells: List[BrailleCell], row_spacing: float, col_spacing: float) -> Tuple[int, int]:
+        if not cells:
+            return 0, 0
+            
+        cell_ys = sorted([c.y for c in cells])
+        cell_xs = sorted([c.x for c in cells])
+        
+        row_count = 1
+        for k in range(1, len(cell_ys)):
+            if cell_ys[k] - cell_ys[k-1] > 1.5 * row_spacing:
+                row_count += 1
+                
+        col_count = 1
+        for k in range(1, len(cell_xs)):
+            if cell_xs[k] - cell_xs[k-1] > 1.5 * col_spacing:
+                col_count += 1
+                
+        return row_count, col_count
 
-def _rescale_dots(dots: List[BrailleDot], scale: float) -> List[BrailleDot]:
-    """Convert coordinates from processing scale back to original image scale."""
-    if scale == 1.0:
-        return dots
-    inv = 1.0 / scale
-    return [
-        BrailleDot(
-            x=int(d.x * inv),
-            y=int(d.y * inv),
-            radius=d.radius * inv,
-            confidence=d.confidence,
-        )
-        for d in dots
-    ]
+    def _draw_overlay(self, bgr: np.ndarray, accepted: List[BrailleDot], rejected: List[BrailleDot], cells: List[BrailleCell]) -> np.ndarray:
+        out = bgr.copy()
+        
+        # Display counts
+        cv2.putText(out, f"Accepted dots: {len(accepted)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(out, f"Rejected dots: {len(rejected)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(out, f"Detected cells: {len(cells)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Blue = detected Braille cells
+        for cell in cells:
+            cv2.rectangle(out, (cell.x, cell.y), (cell.x + cell.w, cell.y + cell.h), (255, 0, 0), 2, cv2.LINE_AA)
+            if cell.translated_char:
+                cv2.putText(out, cell.translated_char, (cell.x, cell.y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
+                
+        # Red = rejected dots
+        for d in rejected:
+            cv2.circle(out, (d.x, d.y), max(3, int(d.radius)), (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.line(out, (d.x - 3, d.y), (d.x + 3, d.y), (0, 0, 255), 1)
+            cv2.line(out, (d.x, d.y - 3), (d.x, d.y + 3), (0, 0, 255), 1)
+            
+        # Green = accepted dots
+        for d in accepted:
+            cv2.circle(out, (d.x, d.y), max(3, int(d.radius)), (0, 255, 0), 2, cv2.LINE_AA)
+            
+        return out

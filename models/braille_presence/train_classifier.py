@@ -66,7 +66,7 @@ import numpy as np
 
 # ── Paths ─────────────────────────────────────────────────────
 ROOT_DIR    = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-DATASET_DIR = os.path.join(ROOT_DIR, "datasets")
+DATASET_DIR = os.path.join(ROOT_DIR, "datasets/braille_presence")
 MODEL_DIR   = os.path.join(ROOT_DIR, "models", "braille_presence")
 SAVE_PATH   = os.path.join(MODEL_DIR, "braille_classifier.keras")
 
@@ -88,9 +88,9 @@ def build_mobilenet_classifier(img_size: int = 224) -> "tf.keras.Model":
         Dense(1, sigmoid)   ← 1 = braille, 0 = non_braille
     """
     import tensorflow as tf
-    from keras.applications import MobileNetV2
-    from keras.layers import Dense, Dropout, GlobalAveragePooling2D, Input
-    from keras.models import Model
+    from tensorflow.keras.applications import MobileNetV2
+    from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, Input
+    from tensorflow.keras.models import Model
 
     base = MobileNetV2(
         input_shape=(img_size, img_size, 3),
@@ -166,8 +166,8 @@ def train(
         lr:         Initial learning rate.
     """
     import tensorflow as tf
-    from keras.optimizers import Adam
-    from keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+    from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 
     print(f"[Training] Dataset dir: {data_dir}")
     print(f"[Training] Save path:   {save_path}")
@@ -201,21 +201,15 @@ def train(
     phase1_epochs = min(10, epochs // 3)
     model.fit(train_ds, validation_data=val_ds, epochs=phase1_epochs, callbacks=callbacks)
 
-    # ── Phase 2: Unfreeze top layers for fine-tuning ─────────
-    print("\n=== Phase 2: Unfreezing top 30 layers for fine-tuning ===")
-    base_model = model.layers[2]   # MobileNetV2 is layer 2
-    base_model.trainable = True
-    for layer in base_model.layers[:-30]:
-        layer.trainable = False
+    # ── Phase 2: Skip fine-tuning for hackathon build ─────────
 
-    model.compile(
-        optimizer=Adam(lr / 10),
-        loss="binary_crossentropy",
-        metrics=["accuracy"],
-    )
-    remaining = max(1, epochs - phase1_epochs)
-    model.fit(train_ds, validation_data=val_ds, epochs=remaining, callbacks=callbacks)
+    print("\n=== Skipping Phase 2 fine-tuning ===")
 
+# Keep MobileNet frozen
+    base_model = model.layers[1]   # MobileNetV2 layer
+    base_model.trainable = False
+
+    print("[Training] Using saved classifier without extra fine-tuning")
     print(f"\n[Training] ✅ Model saved to: {save_path}")
 
     # ── Quick evaluation ─────────────────────────────────────
